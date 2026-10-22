@@ -60,6 +60,23 @@ class TikTokProfileScraper:
         profile_data = self._extract_profile_json(html)
         profile = self._extract_profile_info(profile_data, normalized)
         videos = self._extract_videos(profile_data)
+        if not videos and profile.get("videos_count"):
+            html = self._download_profile_html_playwright(
+                url,
+                headless=headless,
+                wait_after_load_ms=wait_after_load_ms,
+                session_state_path=session_state_path,
+                chrome_profile_path=chrome_profile_path,
+            )
+            profile_data = self._extract_profile_json(html)
+            profile = self._extract_profile_info(profile_data, normalized)
+            videos = self._extract_videos(profile_data)
+            if not videos:
+                raise RuntimeError(
+                    "Se encontró el perfil, pero no se pudieron extraer sus videos. "
+                    "Prueba `--headful` para cargar el perfil en Chrome y resolver "
+                    "cualquier desafío de TikTok."
+                )
         comments = self._extract_comments(profile_data)
         comments.extend(
             comment
@@ -102,6 +119,15 @@ class TikTokProfileScraper:
         session_state_path: str | None,
         chrome_profile_path: str | None,
     ) -> str:
+        if use_playwright:
+            return self._download_profile_html_playwright(
+                url,
+                headless=headless,
+                wait_after_load_ms=wait_after_load_ms,
+                session_state_path=session_state_path,
+                chrome_profile_path=chrome_profile_path,
+            )
+
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

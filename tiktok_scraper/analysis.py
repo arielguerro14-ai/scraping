@@ -14,15 +14,30 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.cluster import KMeans
-from sklearn.decomposition import PCA
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.preprocessing import normalize
 
-TRAITS = {
-    "apertura": ("arte", "música", "musica", "creativo", "curioso", "viaje", "cultura"),
-    "responsabilidad": ("metas", "trabajo", "organizar", "disciplina", "plan", "aprende"),
-    "extraversión": ("amigos", "fiesta", "social", "comparte", "juntos", "comunidad"),
-    "amabilidad": ("amor", "gracias", "ayuda", "familia", "cuidar", "paz", "apoyo"),
-    "neuroticismo": ("ansiedad", "miedo", "estrés", "estres", "triste", "preocupa", "nostalgia"),
+TRAIT_ANCHORS = {
+    "apertura": (
+        "El contenido expresa curiosidad, creatividad, interés por el arte, ideas nuevas y experiencias diferentes.",
+        "El contenido prefiere lo familiar, concreto y rutinario, sin explorar ideas nuevas.",
+    ),
+    "responsabilidad": (
+        "El contenido refleja planificación, disciplina, organización, constancia y cumplimiento de metas.",
+        "El contenido refleja improvisación, desorganización y poca preocupación por los planes o las obligaciones.",
+    ),
+    "extraversión": (
+        "El contenido muestra energía social, comunicación, interacción con otras personas y entusiasmo.",
+        "El contenido muestra reserva, preferencia por la soledad y poca búsqueda de interacción social.",
+    ),
+    "amabilidad": (
+        "El contenido expresa empatía, cooperación, confianza, consideración y preocupación por otras personas.",
+        "El contenido expresa confrontación, desconfianza, competitividad y poca consideración por otras personas.",
+    ),
+    "neuroticismo": (
+        "El contenido expresa preocupación, tensión, inseguridad o emociones negativas intensas.",
+        "El contenido expresa calma, seguridad emocional y estabilidad ante situaciones difíciles.",
+    ),
 }
 POSITIVE_WORDS = ("amor", "gracias", "excelente", "genial", "me encanta", "bonito", "feliz")
 NEGATIVE_WORDS = ("odio", "malo", "triste", "aburrido", "horrible", "decepción", "decepcion")
@@ -74,9 +89,29 @@ def _enrich_dom_videos(data: dict[str, Any]) -> list[dict[str, Any]]:
 def _texts(data: dict[str, Any]) -> list[str]:
     profile = data.get("profile") or {}
     texts = [str(profile.get("bio") or "")]
-    texts.extend(str(video.get("description") or "") for video in data.get("videos", []))
+    texts.extend(_video_texts(data))
     texts.extend(str(comment.get("text") or "") for comment in _valid_comments(data))
     return [text.strip() for text in texts if text.strip()]
+
+
+def _video_texts(data: dict[str, Any]) -> list[str]:
+    texts = []
+    for video in data.get("videos", []):
+        music_title = video.get("music_title")
+        if music_title == "TikTok - Make Your Day":
+            music_title = None
+        text = " ".join(
+            str(value)
+            for value in (
+                video.get("description"),
+                music_title,
+                *(video.get("hashtags") or []),
+            )
+            if value
+        ).strip()
+        if text:
+            texts.append(text)
+    return texts
 
 
 def _content_insights(data: dict[str, Any]) -> dict[str, Any]:
@@ -148,30 +183,54 @@ def _entities(texts: list[str]) -> list[dict[str, Any]]:
     return [{"entity": entity, "mentions": count} for entity, count in counts.most_common()]
 
 
-def _big_five(texts: list[str]) -> list[dict[str, Any]]:
-    joined = " ".join(texts).lower()
-    tokens = WORD_PATTERN.findall(joined)
-    token_count = len(tokens)
+def _big_five(
+    texts: list[str], embeddings: np.ndarray, anchor_embeddings: np.ndarray
+) -> list[dict[str, Any]]:
+    token_count = sum(len(WORD_PATTERN.findall(text)) for text in texts)
     source_count = len(texts)
     results = []
-    for trait, keywords in TRAITS.items():
-        hits = sum(
-            len(re.findall(rf"(?<!\w){re.escape(keyword)}(?!\w)", joined))
-            for keyword in keywords
+    raw_scores = []
+    for index, trait in enumerate(TRAIT_ANCHORS):
+        positive_similarity = float(np.mean(embeddings @ anchor_embeddings[index * 2]))
+        negative_similarity = float(np.mean(embeddings @ anchor_embeddings[index * 2 + 1]))
+        confidence = min(1.0, token_count / 250) * min(1.0, source_count / 50)
+        denominator = abs(positive_similarity) + abs(negative_similarity)
+        raw_score = (
+            50 + 50 * (positive_similarity - negative_similarity) / denominator
+            if denominator
+            else 50
         )
-        confidence = min(1.0, token_count / 40) * min(1.0, source_count / 3)
-        score = round(min(100.0, 100 * hits / len(set(keywords))), 1)
+        raw_scores.append(raw_score)
+        sufficient_evidence = confidence >= 0.5 and token_count >= 20
         results.append(
             {
                 "trait": trait,
-                "score": score if confidence >= 0.5 and token_count >= 20 else None,
-                "keyword_hits": hits,
+                "score": None,
+                "positive_similarity": round(positive_similarity, 3),
+                "negative_similarity": round(negative_similarity, 3),
                 "evidence_words": token_count,
                 "evidence_documents": source_count,
                 "confidence": round(confidence, 2),
-                "status": "suficiente" if confidence >= 0.5 and token_count >= 20 else "insuficiente",
+                "status": "suficiente" if sufficient_evidence else "insuficiente",
             }
         )
+    if results and all(item["status"] == "suficiente" for item in results):
+        total_score = sum(raw_scores)
+        exact_tenths = [
+            score / total_score * 1000 if total_score else 1000 / len(results)
+            for score in raw_scores
+        ]
+        tenths = [int(value) for value in exact_tenths]
+        remainder = 1000 - sum(tenths)
+        remainder_order = sorted(
+            range(len(results)),
+            key=lambda index: exact_tenths[index] - tenths[index],
+            reverse=True,
+        )
+        for index in remainder_order[:remainder]:
+            tenths[index] += 1
+        for item, value in zip(results, tenths):
+            item["score"] = value / 10
     return results
 
 
@@ -189,26 +248,45 @@ def _embeddings(texts: list[str]) -> tuple[np.ndarray, str]:
         matrix = vectorizer.fit_transform(texts).toarray()
     except ValueError:
         matrix = np.zeros((len(texts), 1), dtype=float)
-    return matrix, "tfidf-fallback"
+    return normalize(matrix), "tfidf-fallback"
 
 
 def _topics(texts: list[str], embeddings: np.ndarray) -> list[dict[str, Any]]:
     if len(texts) < 2:
-        return [{"cluster": 0, "label": "contenido insuficiente", "documents": len(texts)}]
+        return [
+            {
+                "cluster": 0,
+                "label": "contenido insuficiente",
+                "documents": len(texts),
+                "percentage": 100.0 if texts else 0.0,
+            }
+        ]
     distinct_count = len(np.unique(embeddings, axis=0))
     cluster_count = min(5, max(2, int(np.sqrt(len(texts))), distinct_count))
     cluster_count = min(cluster_count, distinct_count)
     if cluster_count < 2:
-        return [{"cluster": 0, "label": "contenido repetido", "documents": len(texts)}]
+        return [
+            {
+                "cluster": 0,
+                "label": "contenido repetido",
+                "documents": len(texts),
+                "percentage": 100.0,
+            }
+        ]
     labels = KMeans(n_clusters=cluster_count, random_state=42, n_init=10).fit_predict(embeddings)
     vectorizer = TfidfVectorizer(stop_words=None, max_features=256)
     try:
         matrix = vectorizer.fit_transform(texts)
     except ValueError:
-        return [
-            {"cluster": cluster, "label": f"tema {cluster + 1}", "documents": int(np.sum(labels == cluster))}
+        topics = [
+            {
+                "cluster": cluster,
+                "label": f"tema {cluster + 1}",
+                "documents": int(np.sum(labels == cluster)),
+            }
             for cluster in range(cluster_count)
         ]
+        return _add_topic_percentages(topics, len(texts))
     terms = np.asarray(vectorizer.get_feature_names_out())
     topics = []
     for cluster in range(cluster_count):
@@ -222,6 +300,29 @@ def _topics(texts: list[str], embeddings: np.ndarray) -> list[dict[str, Any]]:
                 "documents": int(len(indexes)),
             }
         )
+    return _add_topic_percentages(topics, len(texts))
+
+
+def _add_topic_percentages(
+    topics: list[dict[str, Any]], document_count: int
+) -> list[dict[str, Any]]:
+    if not topics or not document_count:
+        return topics
+    exact_tenths = [
+        topic["documents"] / document_count * 1000
+        for topic in topics
+    ]
+    tenths = [int(value) for value in exact_tenths]
+    remainder = 1000 - sum(tenths)
+    remainder_order = sorted(
+        range(len(topics)),
+        key=lambda index: exact_tenths[index] - tenths[index],
+        reverse=True,
+    )
+    for index in remainder_order[:remainder]:
+        tenths[index] += 1
+    for topic, value in zip(topics, tenths):
+        topic["percentage"] = value / 10
     return topics
 
 
@@ -242,7 +343,7 @@ def _write_charts(
     axis.fill(angles, values, alpha=0.25)
     axis.set_ylim(0, 100)
     axis.set_xticks(angles[:-1], [item["trait"].title() for item in big_five])
-    axis.set_title("Perfil Big Five (indicadores léxicos; 0 = sin evidencia)")
+    axis.set_title("Distribución relativa de señales Big Five (suma 100 %)")
     path = output_dir / "big_five_radar.png"
     figure.savefig(path, dpi=160, bbox_inches="tight")
     plt.close(figure)
@@ -291,21 +392,29 @@ def _write_charts(
     plt.close(figure)
     paths.append(str(path))
 
-    if len(embeddings) >= 1:
-        if len(embeddings) == 1:
-            points = np.zeros((1, 2))
-        else:
-            if embeddings.shape[1] < 2:
-                points = np.column_stack((embeddings[:, 0], np.zeros(len(embeddings))))
-            else:
-                points = PCA(n_components=2, random_state=42).fit_transform(embeddings)
-        figure, axis = plt.subplots(figsize=(8, 5))
-        axis.scatter(points[:, 0], points[:, 1], alpha=0.8)
-        for index, (x, y) in enumerate(points):
-            axis.annotate(str(index + 1), (x, y))
-        axis.set_title("Mapa de intereses y conocimiento temático")
-        axis.set_xlabel("Componente semántico 1")
-        axis.set_ylabel("Componente semántico 2")
+    if topics:
+        ordered_topics = sorted(topics, key=lambda item: item["percentage"])
+        figure, axis = plt.subplots(
+            figsize=(10, max(4, len(ordered_topics) * 0.9))
+        )
+        bars = axis.barh(
+            [item["label"] for item in ordered_topics],
+            [item["percentage"] for item in ordered_topics],
+            color="#526dca",
+        )
+        axis.set_xlim(0, max(100, max(item["percentage"] for item in ordered_topics) + 20))
+        axis.set_xlabel("% de videos por tema")
+        axis.set_title("Intereses y cobertura temática de los videos")
+        axis.set_xticks(np.arange(0, 101, 20))
+        axis.bar_label(
+            bars,
+            labels=[
+                f"{item['percentage']:.1f}% ({item['documents']} videos)"
+                for item in ordered_topics
+            ],
+            padding=4,
+        )
+        figure.tight_layout()
         path = output_dir / "interest_map.png"
         figure.savefig(path, dpi=160, bbox_inches="tight")
         plt.close(figure)
@@ -318,15 +427,43 @@ def analyze_profile(data: dict[str, Any], output_dir: str | Path = "output/analy
     output_path.mkdir(parents=True, exist_ok=True)
     enriched_data = {**data, "videos": _enrich_dom_videos(data)}
     texts = _texts(enriched_data)
+    video_texts = _video_texts(enriched_data)
     entities = _entities(texts)
-    big_five = _big_five(texts)
     insights = _content_insights(enriched_data)
-    if texts:
-        embeddings, embedding_method = _embeddings(texts)
-        topics = _topics(texts, embeddings)
+    if video_texts:
+        anchor_texts = [
+            anchor
+            for anchors in TRAIT_ANCHORS.values()
+            for anchor in anchors
+        ]
+        all_embeddings, embedding_method = _embeddings([*video_texts, *anchor_texts])
+        embeddings = all_embeddings[: len(video_texts)]
+        big_five = _big_five(
+            video_texts,
+            embeddings,
+            all_embeddings[len(video_texts) :],
+        )
+        topics = _topics(video_texts, embeddings)
     else:
         embeddings, embedding_method, topics = np.empty((0, 0)), "not-available", []
-    charts = _write_charts(output_path, big_five, topics, embeddings, insights) if texts else []
+        big_five = [
+            {
+                "trait": trait,
+                "score": None,
+                "positive_similarity": None,
+                "negative_similarity": None,
+                "evidence_words": 0,
+                "evidence_documents": 0,
+                "confidence": 0.0,
+                "status": "insuficiente",
+            }
+            for trait in TRAIT_ANCHORS
+        ]
+    charts = (
+        _write_charts(output_path, big_five, topics, embeddings, insights)
+        if video_texts
+        else []
+    )
     expected_videos = (data.get("profile") or {}).get("videos_count")
     videos_extracted = len(data.get("videos") or [])
     is_partial = bool(expected_videos and videos_extracted < expected_videos)
@@ -343,16 +480,24 @@ def analyze_profile(data: dict[str, Any], output_dir: str | Path = "output/analy
     }
     result = {
         "methodology": {
-            "big_five": "Indicadores léxicos exploratorios; no constituyen una evaluación psicológica.",
+            "big_five": (
+                "Distribución relativa normalizada de similitud semántica entre los videos "
+                "publicados y descripciones de los cinco rasgos (suma 100 %); no evalúa "
+                "la personalidad real de la persona."
+            ),
             "entities": "Hashtags, menciones y nombres propios detectados por reglas.",
             "embeddings": embedding_method,
             "semantic_clustering": "KMeans sobre embeddings",
+            "topics": (
+                "Porcentaje de videos asignados a cada grupo semántico; los términos "
+                "representativos describen cobertura del contenido y no miden conocimiento."
+            ),
         },
         "big_five": big_five,
         "entities": entities,
         "topics": topics,
         "charts": charts,
-        "text_count": len(texts),
+        "text_count": len(video_texts),
         "content_insights": insights,
         "extraction": extraction,
     }
@@ -365,7 +510,12 @@ def analyze_profile(data: dict[str, Any], output_dir: str | Path = "output/analy
             ("big_five", item["trait"], item["score"] if item["score"] is not None else "no concluyente")
             for item in big_five
         )
-        writer.writerows(("topic", item["label"], item["documents"]) for item in topics)
+        writer.writerows(                (
+            "topic",
+            item["label"],
+            f"{item['percentage']:.1f}% ({item['documents']} videos)",
+        )
+        for item in topics)
         writer.writerows(
             ("content_type", item["type"], item["videos"])
             for item in insights["content_types"]
@@ -382,8 +532,11 @@ def analyze_profile(data: dict[str, Any], output_dir: str | Path = "output/analy
 def format_results_table(result: dict[str, Any]) -> str:
     lines = ["| Tipo | Resultado | Valor |", "|---|---|---:|"]
     for item in result["big_five"]:
-        score = f"{item['score']:.1f}/100" if item["score"] is not None else "No concluyente"
+        score = f"{item['score']:.1f}%" if item["score"] is not None else "No concluyente"
         lines.append(f"| Big Five | {item['trait']} | {score} |")
+    if result["big_five"] and all(item["score"] is not None for item in result["big_five"]):
+        total = sum(item["score"] for item in result["big_five"])
+        lines.append(f"| Big Five | Total | {total:.1f}% |")
     for item in result["topics"]:
         lines.append(f"| Tema | {item['label']} | {item['documents']} documentos |")
     return "\n".join(lines)
@@ -440,7 +593,7 @@ def write_html_report(
     bar_rows = []
     for item in result["big_five"]:
         score = float(item["score"] or 0)
-        score_label = f"{score:.1f}/100" if item["score"] is not None else "No concluyente"
+        score_label = f"{score:.1f}%" if item["score"] is not None else "No concluyente"
         bar_rows.append(
             f'<div class="bar-row"><div class="trait-name">'
             f'{html.escape(item["trait"].title())}</div>'
@@ -452,25 +605,31 @@ def write_html_report(
     big_five_table_rows = []
     for item in result["big_five"]:
         score_text = (
-            f"{float(item['score']):.1f}/100"
+            f"{float(item['score']):.1f}%"
             if item["score"] is not None
             else "No concluyente"
         )
         big_five_table_rows.append(
             f"<tr><td>{html.escape(item['trait'].title())}</td>"
             f"<td>{score_text}</td>"
-            f"<td>{item.get('keyword_hits', 0)} palabras; "
+            f"<td>{item.get('evidence_words', 0)} palabras; "
             f"confianza {item.get('confidence', 0):.0%}</td></tr>"
         )
     big_five_table = "".join(big_five_table_rows)
+    big_five_total = (
+        f"<tr><th>Total</th><th>{sum(item['score'] for item in result['big_five'] if item['score'] is not None):.1f}%</th>"
+        "<th>Distribución relativa</th></tr>"
+        if not any(item["score"] is None for item in result["big_five"])
+        else ""
+    )
     insufficient_big_five = not any(
         item["score"] is not None for item in result["big_five"]
     )
     big_five_notice = (
-        '<div class="warning">No hay suficiente texto temático para estimar los rasgos. '
-        "Se necesitan al menos 20 palabras analizables y varias publicaciones o comentarios. "
+        '<div class="warning">No hay suficiente texto temático para calcular señales semánticas. '
+        "Se necesitan al menos 20 palabras analizables y varias publicaciones extraídas. "
         "Las puntuaciones se muestran como <strong>No concluyente</strong> para evitar "
-        "inferencias no sustentadas.</div>"
+        "inferencias no sustentadas. Estas señales no representan la personalidad real.</div>"
         if insufficient_big_five
         else ""
     )
@@ -481,6 +640,12 @@ def write_html_report(
         if map_image
         else "<p>No hay suficientes textos para construir el mapa temático.</p>"
     )
+    topic_rows = "".join(
+        f"<tr><td>{html.escape(str(item['label']))}</td>"
+        f"<td>{item['percentage']:.1f}%</td>"
+        f"<td>{item['documents']}</td></tr>"
+        for item in result["topics"]
+    ) or "<tr><td colspan='3'>No hay temas identificables en los videos extraídos.</td></tr>"
     insights = result["content_insights"]
     type_rows = "".join(
         f"<tr><td>{html.escape(item['type'])}</td><td>{item['videos']}</td></tr>"
@@ -550,11 +715,11 @@ th {{ background:#eef2ff; }} .bar-row {{ display:flex; align-items:center; gap:1
 <div class="table-wrap"><table><thead><tr><th>Tipo</th><th>Campo</th><th>Valor</th></tr></thead>
 <tbody>{table_rows}</tbody></table></div></section>
 <section><h2>2. Big Five</h2>
-<p class="note">Indicadores léxicos exploratorios; no constituyen una evaluación psicológica.</p>
+<p class="note">Señales semánticas exploratorias de las descripciones, hashtags y música de los videos extraídos. Los cinco porcentajes se normalizan para sumar 100 % y no representan una evaluación de la personalidad real.</p>
 {big_five_notice}
-<div class="table-wrap"><table><thead><tr><th>Rasgo</th><th>Puntuación</th><th>Indicadores encontrados</th></tr></thead>
-<tbody>{big_five_table}</tbody></table></div>
-<h3>Puntuación visual (escala 0–100)</h3>
+<div class="table-wrap"><table><thead><tr><th>Rasgo</th><th>Distribución (%)</th><th>Evidencia</th></tr></thead>
+<tbody>{big_five_table}{big_five_total}</tbody></table></div>
+<h3>Distribución relativa de señales (suma 100 %)</h3>
 {''.join(bar_rows)}</section>
 <section><h2>Intereses, tipos de contenido y reacciones</h2>
 <p><strong>Intereses inferidos de la biografía:</strong> {profile_interest_markup}</p>
@@ -568,8 +733,10 @@ th {{ background:#eef2ff; }} .bar-row {{ display:flex; align-items:center; gap:1
 <tbody>{comment_rows}</tbody></table>
 </section>
 <section class="map"><h2>3. Mapa de intereses y conocimiento temático</h2>
-<p class="note">Agrupación semántica del contenido mediante embeddings y K-Means.</p>
+<p class="note">Cada porcentaje muestra qué parte de los videos extraídos corresponde a ese tema; juntos suman 100 %. Los términos del tema describen la cobertura temática observada, no miden cuánto sabe la persona sobre ellos.</p>
 {map_markup}
+<div class="table-wrap"><table><thead><tr><th>Interés / tema y términos representativos</th><th>Porcentaje de videos</th><th>Videos</th></tr></thead>
+<tbody>{topic_rows}</tbody></table></div>
 </section>
 </main></body></html>"""
     report_path = output_dir / "report.html"

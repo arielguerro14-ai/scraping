@@ -1,111 +1,217 @@
-# TikTok Profile Scraper (público)
+# TikTok Profile Scraper (contenido público)
 
-Proyecto simple en Python para extraer información **pública** de una cuenta de TikTok y guardarla en JSON.
+Herramienta de línea de comandos en Python para recopilar la información que TikTok
+expone públicamente en un perfil y generar un informe exploratorio de sus videos. Los
+datos se guardan localmente en JSON, CSV, HTML y gráficos.
 
-## Qué obtiene
+> El análisis describe únicamente el contenido público extraído. Las señales semánticas
+> Big Five no son una prueba psicológica ni permiten determinar la personalidad real de
+> la persona. El mapa temático muestra qué temas aparecen en los videos observados; no
+> mide cuánto sabe la persona sobre esos temas.
 
-- Datos del perfil: username, nickname, bio, verificación y métricas generales.
-- Lista de videos visibles: descripción, fecha, vistas, likes, comentarios, compartidos,
-  guardados, duración, portada, música, autor y hashtags.
-- Clasificación del tipo de contenido, hashtags principales, acumulado de reacciones,
-  muestra de comentarios públicos, usuarios comentaristas y sentimiento léxico básico.
-- En modo Playwright se realizan desplazamientos automáticos para cargar más publicaciones.
-- Si TikTok no incluye la lista de publicaciones en el JSON, se recuperan los enlaces
-  y descripciones de las tarjetas visibles en el DOM de Chrome.
-- Análisis exploratorio: indicadores Big Five, extracción de entidades, agrupación semántica
-  mediante embeddings y gráficos en `output/analysis/`.
+## Contenido del análisis
+
+### Perfil y publicaciones
+
+Cuando TikTok los expone, se recopilan:
+
+- Nombre de usuario, nickname, biografía, avatar, enlace, idioma, región y verificación.
+- Métricas del perfil: seguidores, seguidos, likes y número total de videos.
+- Publicaciones visibles: descripción, fecha, visualizaciones, likes, comentarios,
+  compartidos, guardados, duración, portada, música, autor y hashtags.
+- Comentarios públicos disponibles en el HTML/JSON de las páginas consultadas.
+
+La extracción puede ser parcial: TikTok puede entregar solo las publicaciones que cargó
+en la página. Por ejemplo, el perfil puede indicar 397 videos mientras que la sesión solo
+permite recopilar 27. El informe indica cuántos se esperaban y cuántos se analizaron; no
+interpreta los videos no extraídos.
+
+### Señales Big Five
+
+El análisis crea un embedding multilingüe para el texto de cada video disponible. Usa
+descripción, hashtags y título de música, excluyendo títulos genéricos de TikTok. Después
+compara esos embeddings con descripciones semánticas de ambos polos de cada dimensión:
+
+- **Apertura:** curiosidad, creatividad e interés por ideas o experiencias nuevas frente
+  a preferencia por lo familiar y rutinario.
+- **Responsabilidad:** planificación, disciplina y constancia frente a improvisación y
+  desorganización.
+- **Extraversión:** energía e interacción social frente a reserva y preferencia por la
+  soledad.
+- **Amabilidad:** empatía, cooperación y consideración frente a confrontación y
+  desconfianza.
+- **Neuroticismo:** preocupación, tensión e inseguridad frente a calma y estabilidad.
+
+La similitud relativa con ambos polos produce una señal por dimensión. Para facilitar
+la lectura conjunta, las cinco señales se normalizan como porcentajes que suman
+exactamente **100 %** (con redondeo a una décima). Por tanto, son proporciones relativas
+dentro de este análisis: **no** son cinco puntuaciones independientes, percentiles,
+probabilidades ni un diagnóstico. Un porcentaje mayor solo indica mayor peso relativo
+de esa dimensión frente a las otras en el texto disponible.
+
+Para cada dimensión, el sistema promedia la similitud semántica de los videos con sus dos
+descripciones y obtiene una señal bruta entre 0 y 100. Después normaliza las cinco señales
+brutas para formar la distribución porcentual. El informe también muestra el total de
+palabras analizables, la cantidad de videos de evidencia y un indicador de suficiencia:
+`min(1, palabras / 250) × min(1, videos / 50)`. Se requiere además un mínimo de 20 palabras
+y una confianza de al menos 0,5; si no se alcanza, las puntuaciones figuran como
+«No concluyente». Este indicador es una regla interna de cobertura textual, no una
+probabilidad de que la estimación sea correcta. Aun con evidencia suficiente, la
+interpretación sigue limitada al contenido público recopilado.
+
+### Intereses y mapa temático
+
+Los embeddings de los videos se agrupan con K-Means. Para cada grupo, el análisis muestra
+los términos más representativos y calcula:
+
+`porcentaje del tema = videos asignados al grupo / videos con texto analizable × 100`
+
+Los porcentajes se redondean a una décima y se ajustan para sumar **100 %**. El mapa
+`interest_map.png` presenta barras con el porcentaje y número de videos por tema; el
+informe incluye además una tabla con esos datos. Los términos son etiquetas automáticas
+del contenido (por ejemplo, frases, artistas, letras o nostalgia). El porcentaje mide
+la distribución de las publicaciones entre los temas, no el conocimiento ni el nivel
+de experiencia de quien publica.
+
+Otros indicadores del informe incluyen hashtags frecuentes, tipos de contenido,
+reacciones acumuladas, una muestra de comentarios públicos y un análisis léxico básico
+del sentimiento de esos comentarios. El sentimiento se calcula sobre los comentarios,
+no sobre la personalidad del autor.
 
 ## Requisitos
 
-- Python 3.10+
+- Python 3.10 o posterior.
+- Google Chrome instalado para el modo de navegador visible (`--headful`).
+- Conexión a Internet en el primer análisis para descargar el modelo multilingüe de
+  `sentence-transformers` y sus archivos. El modelo queda en caché para ejecuciones
+  posteriores.
 
 ## Instalación
 
-```bash
+Desde la carpeta del proyecto, en Windows:
+
+```powershell
 python -m venv .venv
-.venv\Scripts\activate
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 python -m playwright install chromium
 ```
 
-## Uso
+Si usas el símbolo del sistema (`cmd.exe`), activa el entorno con:
+
+```bat
+.venv\Scripts\activate.bat
+```
+
+## Ejecución
+
+Con un nombre de usuario (con o sin `@`):
 
 ```bash
 python main.py usuario_tiktok
 ```
 
-También puedes pasar la URL completa del perfil:
+También puedes indicar la URL del perfil:
 
 ```bash
 python main.py https://www.tiktok.com/@usuario_tiktok
 ```
 
-Con salida personalizada:
+El comando descarga los datos, los guarda en `output/profile.json`, genera el análisis
+y muestra en la terminal una tabla con las señales Big Five y los temas. Si quieres
+guardar el JSON en otra ruta:
 
 ```bash
 python main.py usuario_tiktok --output output/mi_cuenta.json
 ```
 
-Al finalizar se imprime una tabla Markdown con los resultados y se generan:
-
-- `output/analysis/analysis.json` y `results.csv` con los resultados reproducibles.
-- `big_five_radar.png`, `topic_distribution.png` e `interest_map.png`.
-- `report.html`, una página web ordenada como tabla de datos, gráfico de barras
-  Big Five y mapa de intereses/conocimiento temático.
-- `content_types.png` y `reactions.png` para complementar el análisis de temas y
-  reacciones.
-
-El Big Five es un indicador léxico exploratorio del contenido público, no una evaluación
-psicológica. Los embeddings multilingües usan `sentence-transformers`; si no está disponible,
-se usa un embedding TF-IDF como fallback.
-
-Para guardar solo el perfil sin análisis:
+Para guardar solo el perfil, sin análisis ni gráficos:
 
 ```bash
 python main.py usuario_tiktok --skip-analysis
 ```
 
-Si TikTok bloquea por WAF, el scraper intenta Playwright automáticamente:
+### Navegador y sesión de TikTok
+
+Por defecto, primero se intenta obtener la página directamente y se recurre a Playwright
+si TikTok bloquea esa solicitud. Para usar Playwright desde el inicio:
 
 ```bash
 python main.py usuario_tiktok --use-playwright
 ```
 
-La bandera anterior fuerza Playwright desde el inicio, pero ya no es necesaria
-cuando el bloqueo se detecta. Si aparece un desafío visual, abre el navegador:
+Si el perfil llega sin videos o aparece un desafío de TikTok, abre Chrome para ver la
+página y resolverlo manualmente:
 
 ```bash
-python main.py usuario_tiktok --headful --wait-seconds 25
+python main.py usuario_tiktok --use-playwright --headful --wait-seconds 30
 ```
 
-Para abrir navegador visible y resolver desafío/login manual:
+En modo visible se utiliza Google Chrome y el perfil de navegador persistente
+`output/chrome-profile`. Completa el desafío en esa ventana y deja que termine la
+ejecución. No abras a la vez otra instancia de Chrome que esté usando ese mismo perfil.
+
+Para guardar y reutilizar el estado de sesión/cookies explícitamente:
 
 ```bash
-python main.py usuario_tiktok --use-playwright --headful --wait-seconds 20
+python main.py usuario_tiktok --use-playwright --headful --wait-seconds 30 --session-state output/tiktok_session_state.json
 ```
 
-En modo `--headful` se abre el Google Chrome instalado en el equipo, no un perfil
-temporal de Chromium. La sesión se conserva en `output/chrome-profile`; inicia
-sesión en TikTok dentro de esa ventana y reutilízala en las siguientes ejecuciones.
-No abras simultáneamente otra instancia usando ese mismo perfil.
-
-Para reutilizar sesión/cookies entre ejecuciones (recomendado):
-
-```bash
-python main.py usuario_tiktok --use-playwright --headful --wait-seconds 25 --session-state output/tiktok_session_state.json
-```
-
-Después de esa primera ejecución, puedes volver a correr en headless con la misma sesión:
+En ejecuciones posteriores, se puede intentar reutilizar ese estado en modo headless:
 
 ```bash
 python main.py usuario_tiktok --use-playwright --session-state output/tiktok_session_state.json
 ```
 
-## Nota importante
+La sesión es local. No compartas los archivos de cookies o el perfil del navegador.
+No uses estas opciones para acceder a contenido privado ni para eludir controles de
+autenticación.
 
-- Este proyecto está diseñado para páginas públicas.
-- TikTok puede cambiar su HTML o aplicar bloqueos (WAF). En ese caso se intenta
-  Playwright automáticamente y se puede completar el desafío de forma manual con `--headful`.
-- Los comentarios individuales solo se extraen cuando TikTok los expone públicamente
-  en el HTML/JSON recibido; no se accede a endpoints privados ni se elude autenticación.
-- Respeta siempre términos de servicio y legislación aplicable al uso de datos.
+## Opciones de línea de comandos
+
+| Opción | Predeterminado | Descripción |
+|---|---|---|
+| `username` | — | Usuario de TikTok o URL del perfil. |
+| `-o`, `--output` | `output/profile.json` | Ruta del JSON del perfil y videos. |
+| `--use-playwright` | Desactivado | Abre el perfil con Playwright desde el inicio. |
+| `--headful` | Desactivado | Usa Chrome visible para resolver manualmente un desafío o login. |
+| `--wait-seconds` | `10` | Espera tras cargar el perfil cuando se usa Playwright. |
+| `--session-state` | `output/tiktok_session_state.json` | Ruta para leer y guardar estado de sesión. |
+| `--chrome-profile` | `output/chrome-profile` | Directorio del perfil persistente de Chrome. |
+| `--analysis-output` | `output/analysis` | Directorio para resultados, gráficos e informe. |
+| `--skip-analysis` | Desactivado | Guarda el perfil sin calcular el análisis. |
+
+## Archivos generados
+
+Al ejecutar el análisis se crean:
+
+| Archivo | Contenido |
+|---|---|
+| `output/profile.json` | Datos del perfil, publicaciones, comentarios disponibles y estado de extracción. |
+| `output/analysis/analysis.json` | Metodología, porcentajes Big Five, temas, métricas y estado de extracción. |
+| `output/analysis/results.csv` | Resumen tabular de rasgos, temas, tipos de contenido y reacciones. |
+| `output/analysis/report.html` | Informe navegable con datos, tablas, señales Big Five y mapa temático. |
+| `output/analysis/big_five_radar.png` | Gráfico de las señales relativas Big Five. |
+| `output/analysis/interest_map.png` | Porcentaje y cantidad de videos asignados a cada tema. |
+| `output/analysis/topic_distribution.png` | Cantidad de videos por agrupación temática. |
+| `output/analysis/content_types.png` | Tipos de contenido detectados. |
+| `output/analysis/reactions.png` | Métricas de reacciones disponibles. |
+
+Los resultados y gráficos reflejan únicamente los videos que se hayan extraído. Revisa
+el estado de extracción antes de interpretar el informe.
+
+## Limitaciones y uso responsable
+
+- TikTok puede cambiar su página, sus datos o sus medidas antibots (WAF); la extracción
+  puede fallar o ser parcial. En algunos casos hace falta completar un desafío en Chrome.
+- Solo se analizan las publicaciones visibles que se hayan podido cargar. No se garantiza
+  la descarga de todos los videos del perfil.
+- La información de comentarios se limita a lo que TikTok expone públicamente en la
+  página recibida; no se consultan endpoints privados.
+- La agrupación temática depende del texto disponible y del modelo de embeddings. Las
+  etiquetas automáticas pueden ser incompletas o poco representativas, especialmente si
+  hay pocos videos.
+- Big Five y porcentajes temáticos son indicadores exploratorios del contenido, no
+  evaluaciones psicológicas ni mediciones de conocimientos.
+- Respeta los términos de servicio de TikTok, la legislación aplicable y la privacidad
+  de las personas cuyos datos públicos proceses.
